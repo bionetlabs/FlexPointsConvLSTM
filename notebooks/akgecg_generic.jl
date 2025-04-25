@@ -1,5 +1,5 @@
 ### A Pluto.jl notebook ###
-# v0.20.4
+# v0.20.6
 
 using Markdown
 using InteractiveUtils
@@ -35,6 +35,10 @@ begin
     using Latexify
     using HypothesisTests
     using Random
+
+    import GeoInterface as GI
+    import GeometryOps as GO
+    import GeometryBasics as GB
 end
 
 # ╔═╡ f923a8c6-f2ed-41b8-9bd6-f9830790faec
@@ -355,6 +359,17 @@ auxlabeldescribed = OrderedDict(
     "(AFIB" => "Atrial fibrillation",
 )
 
+# ╔═╡ 05de5742-b453-4b20-a156-42c53373974d
+begin
+    rhythmdf = DataFrame(
+        :label => collect(keys(auxfrequencies_raw)),
+        :description => map(x -> auxlabeldescribed[x], collect(keys(auxfrequencies_raw))),
+        :annotations => collect(values(auxfrequencies_raw)),
+        :duration => collect(round.(values(auxfrequencies_raw) ./ (360 * 60); digits=2)),
+    )
+    latexify(rhythmdf; env=:table, booktabs=false, latex=false) |> print
+end
+
 # ╔═╡ 46ab0c02-74ac-434c-a525-7f01312e32ea
 md"##### flexpoints"
 
@@ -440,6 +455,35 @@ function find_flexpoints(ys, parameters, filteredreference)::ChunkData
     )
 end
 
+# ╔═╡ 71b193d8-8481-491a-847c-cbf49041c3d3
+function find_rdp(ys; epsilon=0.03)::ChunkData
+    datalen = length(ys)
+    xs = 1:datalen .|> Float64 |> collect
+    data = GI.LineString([GB.Point2(x, ys[Int(x)]) for x in xs])
+
+    datafiltered = ys
+
+    points2d = GO.simplify(data; tol=epsilon).geom
+    points = Int.(first.(points2d))
+
+
+    reconstruction = map(1:datalen) do x
+        Float64(linapprox(points2d, x))
+    end
+
+    cfscore = cf(ys, points)
+    prdscore = prd(ys, reconstruction)
+    ChunkData(
+        ys,
+        datafiltered,
+        points2d,
+        reconstruction,
+        cfscore,
+        prdscore,
+        qs(cfscore, prdscore),
+    )
+end
+
 # ╔═╡ 299034a7-cea1-4edb-a88f-43003bc34ca7
 fp2k = let
     filteredreference = true
@@ -449,6 +493,17 @@ fp2k = let
         fpdict[seriesname] = find_flexpoints(datadf[!, seriesname], parameters, true)
     end
     fpdict
+end
+
+# ╔═╡ a54fd49b-40db-43d0-816b-9dd0a38a805c
+rdp2k = let
+    filteredreference = true
+    datadf = data2k # data2k, data5k, datafull
+    rdpdict = OrderedDict()
+    for seriesname in names(datadf)
+        rdpdict[seriesname] = find_rdp(datadf[!, seriesname])
+    end
+    rdpdict
 end
 
 # ╔═╡ 81573a74-2b76-4365-a219-db7ed4da982a
@@ -471,65 +526,144 @@ let
     fig1
 end
 
+# ╔═╡ 9afe58ed-8a5c-4660-a262-b21335022339
+let
+    WGLMakie.activate!()
+    set_theme!(theme_dark())
+
+    fig1 = Figure(size=(1322, 500))
+    ax1 = Axis(fig1[1, 1])
+
+    lead = "100_I"
+
+    lines!(ax1, rdp2k[lead].data, colormap=:seaborn_colorblind)
+    lines!(ax1, rdp2k[lead].datafiltered, colormap=:seaborn_colorblind)
+    scatter!(ax1, rdp2k[lead].flexpoints, color=:orange)
+    lines!(ax1, rdp2k[lead].reconstruction, colormap=:seaborn_colorblind, linestyle=:dash)
+
+    println(scores(rdp2k[lead]))
+
+    fig1
+end
+
 # ╔═╡ 56ed382b-7f26-45a6-b0e3-ec6f19f0f890
 function flexpointschunks(
-	selectedauxlabels::Vector{String},
-	chunks::OrderedDict,
-	limit::Union{Missing,Int}=missing;
-	seqencelength::Int=5025,
-	shuffle::Bool=false,
-	rng::Int=58,
+    selectedauxlabels::Vector{String},
+    chunks::OrderedDict,
+    limit::Union{Missing,Int}=missing;
+    seqencelength::Int=5025,
+    shuffle::Bool=false,
+    rng::Int=58,
 )
     filtered_auxlabechunks = filter(((k, v),) -> k in selectedauxlabels, chunks)
     fpdict = OrderedDict(OrderedDict(map(x -> x => OrderedDict("I" => ChunkData[], "II" => ChunkData[]), selectedauxlabels)))
     maxcounter = 0
 
-	@withprogress name = "auxlabel flexpoints chunks" begin
+    @withprogress name = "auxlabel flexpoints chunks" begin
         for (i, (auxlabel, leads)) in enumerate(filtered_auxlabechunks)
             for (j, (lead, chunks)) in enumerate(leads)
                 allchunks = copy(chunks)
-				if shuffle
-					shuffle!(MersenneTwister(rng), allchunks)
-				end
-				counter = 0
-				
-				@progress name = "$(auxlabel) -> $(lead) -> $(length(chunks))" for chunk in allchunks
-					nchunk = length(chunk)
-					validportions = nchunk ÷ seqencelength
-					for portionindex in 1:validportions
-						startindex = max(1, (portionindex - 1) * seqencelength + 1)
-						endindex = portionindex * seqencelength
-		
-						achunk = chunk[startindex:endindex]
-						fpres = find_flexpoints(achunk, parameters, true)
-						push!(fpdict[auxlabel][lead], fpres)
-						counter += length(achunk)
-						if !ismissing(limit) && counter >= limit
-							@logprogress 1.0
-							break
-						end
-						if shuffle && portionindex >= 5
-							break
-						end
-					end
-					if !ismissing(limit) && counter >= limit
-						@logprogress 1.0
-						break
-					end
-				end
-				
-				maxcounter = max(maxcounter, counter)
+                if shuffle
+                    shuffle!(MersenneTwister(rng), allchunks)
+                end
+                counter = 0
+
+                @progress name = "$(auxlabel) -> $(lead) -> $(length(chunks))" for chunk in allchunks
+                    nchunk = length(chunk)
+                    validportions = nchunk ÷ seqencelength
+                    for portionindex in 1:validportions
+                        startindex = max(1, (portionindex - 1) * seqencelength + 1)
+                        endindex = portionindex * seqencelength
+
+                        achunk = chunk[startindex:endindex]
+                        fpres = find_flexpoints(achunk, parameters, true)
+                        push!(fpdict[auxlabel][lead], fpres)
+                        counter += length(achunk)
+                        if !ismissing(limit) && counter >= limit
+                            @logprogress 1.0
+                            break
+                        end
+                        if shuffle && portionindex >= 5
+                            break
+                        end
+                    end
+                    if !ismissing(limit) && counter >= limit
+                        @logprogress 1.0
+                        break
+                    end
+                end
+
+                maxcounter = max(maxcounter, counter)
                 @logprogress (2 * (i - 1) + j) / 2length(chunks)
             end
         end
     end
-	
+
     fpdict, maxcounter
 end
 
+# ╔═╡ efee10e4-8272-4717-b4ea-f4f53cd889ca
+function rdpchunks(
+    selectedauxlabels::Vector{String},
+    chunks::OrderedDict,
+    limit::Union{Missing,Int}=missing;
+    seqencelength::Int=5025,
+    shuffle::Bool=false,
+    rng::Int=58,
+)
+    filtered_auxlabechunks = filter(((k, v),) -> k in selectedauxlabels, chunks)
+    rdpdict = OrderedDict(OrderedDict(map(x -> x => OrderedDict("I" => ChunkData[], "II" => ChunkData[]), selectedauxlabels)))
+    maxcounter = 0
+
+    @withprogress name = "auxlabel flexpoints chunks" begin
+        for (i, (auxlabel, leads)) in enumerate(filtered_auxlabechunks)
+            for (j, (lead, chunks)) in enumerate(leads)
+                allchunks = copy(chunks)
+                if shuffle
+                    shuffle!(MersenneTwister(rng), allchunks)
+                end
+                counter = 0
+
+                @progress name = "$(auxlabel) -> $(lead) -> $(length(chunks))" for chunk in allchunks
+                    nchunk = length(chunk)
+                    validportions = nchunk ÷ seqencelength
+                    for portionindex in 1:validportions
+                        startindex = max(1, (portionindex - 1) * seqencelength + 1)
+                        endindex = portionindex * seqencelength
+
+                        achunk = chunk[startindex:endindex]
+                        rdpres = find_rdp(achunk)
+                        push!(rdpdict[auxlabel][lead], rdpres)
+                        counter += length(achunk)
+                        if !ismissing(limit) && counter >= limit
+                            @logprogress 1.0
+                            break
+                        end
+                        if shuffle && portionindex >= 5
+                            break
+                        end
+                    end
+                    if !ismissing(limit) && counter >= limit
+                        @logprogress 1.0
+                        break
+                    end
+                end
+
+                maxcounter = max(maxcounter, counter)
+                @logprogress (2 * (i - 1) + j) / 2length(chunks)
+            end
+        end
+    end
+
+    rdpdict, maxcounter
+end
+
+# ╔═╡ deeb8466-d89d-45d5-bd7d-ffef89c497e4
+selectedpathology = "(VT"
+
 # ╔═╡ 73302630-7c63-4a95-9196-82d15f3c3905
 vtfp, vt_targetcounter, vt_normalcounter = let
-    targetauxlabel = "(B"
+    targetauxlabel = selectedpathology
     normalauxlabel = "(N"
     selectedauxlabels = [normalauxlabel, targetauxlabel]
 
@@ -540,28 +674,53 @@ vtfp, vt_targetcounter, vt_normalcounter = let
     fpdict, targetcounter, normalcounter
 end
 
-# ╔═╡ 5277510a-71ab-46bd-bb44-b8a4b43709f1
-begin
-	lseg = map(x -> length(x), values(vtfp["(B"])) |> sum
-	nseg = map(x -> length(x), values(vtfp["(N"])) |> sum
-	lseg, nseg
+# ╔═╡ 2571d757-0562-4bc6-aaa5-1b2160e9f1ce
+vtrdp, vtrdp_targetcounter, vtrdp_normalcounter = let
+    targetauxlabel = selectedpathology
+    normalauxlabel = "(N"
+    selectedauxlabels = [normalauxlabel, targetauxlabel]
+
+    target_rdpdict, targetcounter = rdpchunks([targetauxlabel], auxlabelchunks)
+    normal_rdpdict, normalcounter = rdpchunks([normalauxlabel], auxlabelchunks, targetcounter; shuffle=true)
+
+    rdpdict = OrderedDict(target_rdpdict..., normal_rdpdict...)
+    rdpdict, targetcounter, normalcounter
 end
 
-# ╔═╡ 71cd08e3-485c-492b-a5b8-bef07ea5f5b3
+# ╔═╡ 76f98311-86ad-4a15-891f-1cedb5d82713
 begin
-	lcf = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtfp["(B"])) |> mean
-	lprd = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtfp["(B"])) |> mean
-	lqs = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtfp["(B"])) |> mean
-
-	ncf = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtfp["(N"])) |> mean
-	nprd = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtfp["(N"])) |> mean
-	nqs = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtfp["(N"])) |> mean
-	
-	lcf, lprd, lqs, ncf, nprd, nqs
+    lseg = map(x -> length(x), values(vtfp[selectedpathology])) |> sum
+    nseg = map(x -> length(x), values(vtfp["(N"])) |> sum
+    lseg_rdp = map(x -> length(x), values(vtrdp[selectedpathology])) |> sum
+    nseg_rdp = map(x -> length(x), values(vtrdp["(N"])) |> sum
+    lseg, nseg, lseg_rdp, nseg_rdp
 end
 
-# ╔═╡ 02f39a54-a95c-42dc-83b0-7529e548e7d6
-error()
+# ╔═╡ 3da44940-b063-4acf-a4eb-1ef94d0a3cbe
+begin
+    lcf = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtfp[selectedpathology])) |> mean
+    lprd = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtfp[selectedpathology])) |> mean
+    lqs = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtfp[selectedpathology])) |> mean
+
+    ncf = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtfp["(N"])) |> mean
+    nprd = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtfp["(N"])) |> mean
+    nqs = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtfp["(N"])) |> mean
+
+    lcf, lprd, lqs, ncf, nprd, nqs
+end
+
+# ╔═╡ 2c79044d-6c38-4d4f-bcd5-febd40993831
+begin
+    lcf_rdp = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtrdp[selectedpathology])) |> mean
+    lprd_rdp = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtrdp[selectedpathology])) |> mean
+    lqs_rdp = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtrdp[selectedpathology])) |> mean
+
+    ncf_rdp = map(x -> mean(map(y -> y.cf, x) |> collect), values(vtrdp["(N"])) |> mean
+    nprd_rdp = map(x -> mean(map(y -> y.prd, x) |> collect), values(vtrdp["(N"])) |> mean
+    nqs_rdp = map(x -> mean(map(y -> y.qs, x) |> collect), values(vtrdp["(N"])) |> mean
+
+    lcf_rdp, lprd_rdp, lqs_rdp, ncf_rdp, nprd_rdp, nqs_rdp
+end
 
 # ╔═╡ e7e4d8fc-f344-4495-b023-83a2ca66d885
 begin
@@ -613,7 +772,7 @@ let
     ax = Axis(
         fig1[1, 1],
         titlealign=:left,
-        title=string("E) ", auxlabeldescribed["(B"]),
+        title=string("B) ", auxlabeldescribed[selectedpathology]),
         titlefont="Times New Roman",
         titlecolor=:gray25,
         titlesize=fontsize,
@@ -626,7 +785,7 @@ let
         ylabelsize=fontsize * 1.2,
     )
 
-    signal = vtfp["(B"]["I"][1]
+    signal = vtfp[selectedpathology]["I"][1]
 
     fpmin = findfirst(x -> x[1] >= startpoint, signal.flexpoints)
     fpmax = findlast(x -> x[1] <= endpoint, signal.flexpoints)
@@ -637,7 +796,7 @@ let
     scatter!(ax, vtpoints, color=:darkorange2)
     lines!(ax, signal.reconstruction[startpoint:endpoint], color=:deepskyblue3, linestyle=:dashdot, linewidth=1.5)
 
-    save(joinpath(projectdir, "img", "Fig1_(B.png"), fig1, px_per_unit=1)
+    save(joinpath(projectdir, "img", "Fig1_(VT.png"), fig1, px_per_unit=1)
 
     fig1
 end
@@ -647,7 +806,7 @@ md"##### data organization"
 
 # ╔═╡ 946022e6-382b-4b75-a76c-75c1625110a0
 let
-    vtlengths = map(vtfp["(B"]["I"]) do chunk
+    vtlengths = map(vtfp[selectedpathology]["I"]) do chunk
         chunk.data |> length
     end
     normallengths = map(vtfp["(N"]["I"]) do chunk
@@ -666,10 +825,11 @@ begin
     xraw = Array{Float32}(undef, (0, seqencelength))
     xfiltered = Array{Float32}(undef, (0, seqencelength))
     xreconstructed = Array{Float32}(undef, (0, seqencelength))
+    xreconstructed_rdp = Array{Float32}(undef, (0, seqencelength))
     ylabels = []
 
     validportions_vec = []
-    for label in ["(B", "(N"]
+    for label in [selectedpathology, "(N"]
         validportions_total = 0
         for chunk in vtfp[label]["I"]
             nchunk = length(chunk.data)
@@ -680,7 +840,7 @@ begin
     end
     validportions_min = minimum(validportions_vec)
 
-    for label in ["(B", "(N"]
+    for label in [selectedpathology, "(N"]
         validportions_total = 0
         for chunk in vtfp[label]["I"]
             nchunk = length(chunk.data)
@@ -701,7 +861,26 @@ begin
         @label skiplabel
         println("$label validportions_total: $validportions_total")
     end
-    size(xraw), size(xfiltered), size(xreconstructed), size(ylabels)
+
+    for label in [selectedpathology, "(N"]
+        validportions_total = 0
+        for chunk in vtrdp[label]["I"]
+            nchunk = length(chunk.data)
+            validportions = nchunk ÷ seqencelength
+            for portionindex in 1:validportions
+                startindex = max(1, (portionindex - 1) * seqencelength + 1)
+                endindex = portionindex * seqencelength
+                global xreconstructed_rdp = vcat(xreconstructed_rdp, reshape(chunk.reconstruction[startindex:endindex], (1, seqencelength)))
+                validportions_total += 1
+                if validportions_total >= validportions_min
+                    @goto skiplabel_rdp
+                end
+            end
+        end
+        @label skiplabel_rdp
+        println("$label validportions_total: $validportions_total")
+    end
+    size(xraw), size(xfiltered), size(xreconstructed), size(xreconstructed_rdp), size(ylabels)
 end
 
 # ╔═╡ 86beeb4b-c375-4a51-9c72-5c2754e764d4
@@ -759,7 +938,57 @@ begin
             # x -> (println("out: ", size(x)); x),
         )
     end
-    lstmmodel1 = @load(NeuralNetworkClassifier, pkg = "MLJFlux", verbosity = 0)(
+    convlstmmodel1 = @load(NeuralNetworkClassifier, pkg = "MLJFlux", verbosity = 0)(
+        builder=builder, epochs=500, batch_size=128, acceleration=CUDALibs(), optimiser=Flux.Optimisers.Adam(0.001), rng=rngseed
+    )
+end
+
+# ╔═╡ e521d3cd-1939-49b9-a3ef-918ef605ad98
+begin
+    local builder = MLJFlux.@builder begin
+        Flux.Chain(
+            # x -> (println("before reshape: ", size(x)); x),
+            x -> reshape(x, (seqencelength, nofeatures, :)),
+
+            #(signallen, 1, batch) -> (L1, 16, batch)
+            # x -> (println("before conv1: ", size(x)); x),
+            Conv((20,), nofeatures => 3, relu, stride=1, pad=19),
+
+            # x -> (println("before maxpool1: ", size(x)); x),
+            MaxPool((2,), stride=2),
+
+            # x -> (println("before conv2: ", size(x)); x),
+            Conv((10,), 3 => 6, relu, stride=1, pad=9),
+
+            # x -> (println("before maxpool2: ", size(x)); x),
+            MaxPool((2,), stride=2),
+
+            # x -> (println("before conv3: ", size(x)); x),
+            Conv((5,), 6 => 6, relu, stride=1, pad=4),
+
+            # x -> (println("before maxpool3: ", size(x)); x),
+            MaxPool((2,), stride=2),
+			
+            # x -> (println("before flatten: ", size(x)); x),
+            Flux.flatten,
+
+            # x -> (println("before dense1: ", size(x)); x),
+            Dense(786 => 10),
+            # x -> (println("before dense1 dropout: ", size(x)); x),
+            Dropout(0.2),
+
+            # x -> (println("before dense2: ", size(x)); x),
+            Dense(10 => 2),
+            # x -> (println("before dense2 dropout: ", size(x)); x),
+            Dropout(0.2),
+
+            # x -> (println("before softmax: ", size(x)); x),
+            # softmax,
+
+            # x -> (println("out: ", size(x)); x),
+        )
+    end
+    convmodel1 = @load(NeuralNetworkClassifier, pkg = "MLJFlux", verbosity = 0)(
         builder=builder, epochs=500, batch_size=128, acceleration=CUDALibs(), optimiser=Flux.Optimisers.Adam(0.001), rng=rngseed
     )
 end
@@ -769,6 +998,7 @@ begin
     xraw_mlj = coerce(xraw, Continuous)
     xfiltered_mlj = coerce(xfiltered, Continuous)
     xreconstructed_mlj = coerce(xreconstructed, Continuous)
+    xreconstructed_rdp_mlj = coerce(xreconstructed_rdp, Continuous)
     ylabels_mlj = coerce(ylabels, Multiclass)
 end
 
@@ -787,23 +1017,13 @@ begin
 
     xr_train_fold, yr_train_fold = xreconstructed_mlj[testindices, :], ylabels_mlj[testindices]
     xr_test_fold, yr_test_fold = xreconstructed_mlj[trainindices, :], ylabels_mlj[trainindices]
+
+    xrdp_train, yrdp_train = xreconstructed_rdp_mlj[trainindices, :], ylabels_mlj[trainindices]
+    xrdp_test, yrdp_test = xreconstructed_rdp_mlj[testindices, :], ylabels_mlj[testindices]
+
+    xrdp_train_fold, yrdp_train_fold = xreconstructed_rdp_mlj[testindices, :], ylabels_mlj[testindices]
+    xrdp_test_fold, yrdp_test_fold = xreconstructed_rdp_mlj[trainindices, :], ylabels_mlj[trainindices]
 end
-
-# ╔═╡ 1c95df10-2223-4dc6-8fc1-8299c0a97c1b
-# ╠═╡ show_logs = false
-rawmach1 = machine(lstmmodel1, x_train, y_train) |> fit!
-
-# ╔═╡ b7e00e62-7465-4548-9a47-7c5648a2a396
-# ╠═╡ show_logs = false
-rawmach1_fold = machine(lstmmodel1, x_train_fold, y_train_fold) |> fit!
-
-# ╔═╡ 275201ca-e146-4976-a6b7-85dc84d001ee
-# ╠═╡ show_logs = false
-reconstructedmach1 = machine(lstmmodel1, xr_train, yr_train) |> fit!
-
-# ╔═╡ 0aa8efc0-a63b-466d-bcde-6c355af11272
-# ╠═╡ show_logs = false
-reconstructedmach1_fold = machine(lstmmodel1, xr_train_fold, yr_train_fold) |> fit!
 
 # ╔═╡ 48f84c8c-00a1-43db-a1a8-83c3edb5cd7a
 function classificationscore(y_test, y_hat, truelabel)
@@ -813,59 +1033,165 @@ function classificationscore(y_test, y_hat, truelabel)
     accuracy = sum(labelsref .== labelshat) / length(labelsref)
 
     tp = sum(labelshat .== truelabel .&& labelsref .== truelabel)
+    tn = sum(labelshat .!= truelabel .&& labelsref .!= truelabel)
     fp = sum(labelshat .== truelabel .&& labelsref .!= truelabel)
     fn = sum(labelshat .!= truelabel .&& labelsref .== truelabel)
 
     precision = tp / (tp + fp)
     recall = tp / (tp + fn)
+    specificity = tn / (tn + fp)
     f1 = 2tp / (2tp + fp + fn)
 
-    accuracy, precision, recall, f1
+    accuracy, precision, recall, specificity, f1
 end
 
-# ╔═╡ 996b1a7d-4e23-453b-858e-2b7d4db125e0
-let
-    yhat_raw = MLJ.predict_mode(rawmach1, x_test)
-    accuracy_raw, precision_raw, recall_raw, f1_raw = classificationscore(y_test, yhat_raw, "(B")
+# ╔═╡ 6ae73a2d-b6f8-4b5f-b417-5e631fef5030
+@kwdef struct Performance
+    name::String
+    accuracy::Float64
+    precision::Float64
+    recall::Float64
+    specificity::Float64
+    f1::Float64
+end
 
+# ╔═╡ 2c305721-2e11-4e21-992a-a30eea7f128f
+function singlepipeline(model)::Vector{Performance}
+    rawmach1 = machine(model, x_train, y_train) |> fit!
+    rawmach1_fold = machine(model, x_train_fold, y_train_fold) |> fit!
+
+    yhat_raw = MLJ.predict_mode(rawmach1, x_test)
+    accuracy_raw, precision_raw, recall_raw, specificity_raw, f1_raw = classificationscore(y_test, yhat_raw, selectedpathology)
     yhat_raw_fold = MLJ.predict_mode(rawmach1_fold, x_test_fold)
-    accuracy_raw_fold, precision_raw_fold, recall_raw_fold, f1_raw_fold = classificationscore(y_test_fold, yhat_raw_fold, "(B")
+    accuracy_raw_fold, precision_raw_fold, recall_raw_fold, specificity_raw_fold, f1_raw_fold = classificationscore(y_test_fold, yhat_raw_fold, selectedpathology)
 
     accuracy_raw_cv = mean([accuracy_raw, accuracy_raw_fold])
     precision_raw_cv = mean([precision_raw, precision_raw_fold])
     recall_raw_cv = mean([recall_raw, recall_raw_fold])
+    specificity_raw_cv = mean([specificity_raw, specificity_raw_fold])
     f1_raw_cv = mean([f1_raw, f1_raw_fold])
 
-    yhat_reconstructed = MLJ.predict_mode(reconstructedmach1, xr_test)
-    accuracy_reconstructed, precision_reconstructed, recall_reconstructed, f1_reconstructed = classificationscore(yr_test, yhat_reconstructed, "(B")
+    ###
 
-    yhat_reconstructed_fold = MLJ.predict_mode(reconstructedmach1_fold, xr_test_fold)
-    accuracy_reconstructed_fold, precision_reconstructed_fold, recall_reconstructed_fold, f1_reconstructed_fold = classificationscore(
-        yr_test_fold, yhat_reconstructed_fold, "(B"
+    fpmach1 = machine(model, xr_train, yr_train) |> fit!
+    fpmach1_fold = machine(model, xr_train_fold, yr_train_fold) |> fit!
+
+    yhat_fp = MLJ.predict_mode(fpmach1, xr_test)
+    accuracy_fp, precision_fp, recall_fp, specificity_fp, f1_fp = classificationscore(yr_test, yhat_fp, selectedpathology)
+    yhat_fp_fold = MLJ.predict_mode(fpmach1_fold, xr_test_fold)
+    accuracy_fp_fold, precision_fp_fold, recall_fp_fold, specificity_fp_fold, f1_fp_fold = classificationscore(
+        yr_test_fold, yhat_fp_fold, selectedpathology
     )
 
-    accuracy_reconstructed_cv = mean([accuracy_reconstructed, accuracy_reconstructed_fold])
-    precision_reconstructed_cv = mean([precision_reconstructed, precision_reconstructed_fold])
-    recall_reconstructed_cv = mean([recall_reconstructed, recall_reconstructed_fold])
-    f1_reconstructed_cv = mean([f1_reconstructed, f1_reconstructed_fold])
+    accuracy_fp_cv = mean([accuracy_fp, accuracy_fp_fold])
+    precision_fp_cv = mean([precision_fp, precision_fp_fold])
+    recall_fp_cv = mean([recall_fp, recall_fp_fold])
+    specificity_fp_cv = mean([specificity_fp, specificity_fp_fold])
+    f1_fp_cv = mean([f1_fp, f1_fp_fold])
 
-    DataFrame(
-        :data => ["raw", "raw_fold", "raw_cv", "reconstructed", "reconstructed_fold", "reconstructed_cv"],
-        :accuracy => [accuracy_raw, accuracy_raw_fold, accuracy_raw_cv, accuracy_reconstructed, accuracy_reconstructed_fold, accuracy_reconstructed_cv],
-        :precisionn => [precision_raw, precision_raw_fold, precision_raw_cv, precision_reconstructed, precision_reconstructed_fold, precision_reconstructed_cv],
-        :recall => [recall_raw, recall_raw_fold, recall_raw_cv, recall_reconstructed, recall_reconstructed_fold, recall_reconstructed_cv],
-        :f1 => [f1_raw, f1_raw_fold, f1_raw_cv, f1_reconstructed, f1_reconstructed_fold, f1_reconstructed_cv],
+    ###
+
+    rdpmach1 = machine(model, xrdp_train, yrdp_train) |> fit!
+    rdpmach1_fold = machine(model, xrdp_train_fold, yrdp_train_fold) |> fit!
+
+    yhat_rdp = MLJ.predict_mode(rdpmach1, xrdp_test)
+    accuracy_rdp, precision_rdp, recall_rdp, specificity_rdp, f1_rdp = classificationscore(yrdp_test, yhat_rdp, selectedpathology)
+    yhat_rdp_fold = MLJ.predict_mode(rdpmach1_fold, xrdp_test_fold)
+    accuracy_rdp_fold, precision_rdp_fold, recall_rdp_fold, specificity_rdp_fold, f1_rdp_fold = classificationscore(
+        yrdp_test_fold, yhat_rdp_fold, selectedpathology
     )
+
+    accuracy_rdp_cv = mean([accuracy_rdp, accuracy_rdp_fold])
+    precision_rdp_cv = mean([precision_rdp, precision_rdp_fold])
+    recall_rdp_cv = mean([recall_rdp, recall_rdp_fold])
+    specificity_rdp_cv = mean([specificity_rdp, specificity_rdp_fold])
+    f1_rdp_cv = mean([f1_rdp, f1_rdp_fold])
+
+    ###
+
+    [
+        Performance("raw", accuracy_raw, precision_raw, recall_raw, specificity_raw, f1_raw),
+        Performance("raw_fold", accuracy_raw_fold, precision_raw_fold, recall_raw_fold, specificity_raw_fold, f1_raw_fold),
+        Performance("raw_cv", accuracy_raw_cv, precision_raw_cv, recall_raw_cv, specificity_raw_cv, f1_raw_cv),
+        Performance("fp", accuracy_fp, precision_fp, recall_fp, specificity_fp, f1_fp),
+        Performance("fp_fold", accuracy_fp_fold, precision_fp_fold, recall_fp_fold, specificity_fp_fold, f1_fp_fold),
+        Performance("fp_cv", accuracy_fp_cv, precision_fp_cv, recall_fp_cv, specificity_fp_cv, f1_fp_cv),
+        Performance("rdp", accuracy_rdp, precision_rdp, recall_rdp, specificity_rdp, f1_rdp),
+        Performance("rdp_fold", accuracy_rdp_fold, precision_rdp_fold, recall_rdp_fold, specificity_rdp_fold, f1_rdp_fold),
+        Performance("rdp_cv", accuracy_rdp_cv, precision_rdp_cv, recall_rdp_cv, specificity_rdp_cv, f1_rdp_cv)
+    ]
 end
 
-# ╔═╡ 10a6ddd8-223b-41ab-b910-3d5dfa1a9880
-annotations["231"]
+# ╔═╡ 26b88169-076f-433d-a760-64cd7743d393
+function wholepipeline(model; repeat::Int=10)
+    allresults = []
+    for i in 1:repeat
+        performance = singlepipeline(model)
+        push!(allresults, performance)
+        @info "[$i]: $performance"
+    end
+
+    totalperfornamce = OrderedDict(map(x -> x.name => OrderedDict(), first(allresults)))
+    for key in keys(totalperfornamce)
+        for field in fieldnames(Performance)
+            if field != :name
+                totalperfornamce[key][field] = []
+            end
+        end
+    end
+    for result in allresults
+        for performance in result
+            for field in fieldnames(Performance)
+                if field != :name
+                    push!(totalperfornamce[performance.name][field], getproperty(performance, field))
+                end
+            end
+        end
+    end
+
+    meanperfornamce = OrderedDict(
+        map(first(allresults)) do x
+            x.name => Performance(
+                x.name,
+                mean(totalperfornamce[x.name][:accuracy]),
+                mean(totalperfornamce[x.name][:precision]),
+                mean(totalperfornamce[x.name][:recall]),
+                mean(totalperfornamce[x.name][:specificity]),
+                mean(totalperfornamce[x.name][:f1]),
+            )
+        end
+    )
+    stdperfornamce = OrderedDict(
+        map(first(allresults)) do x
+            x.name => Performance(
+                x.name,
+                std(totalperfornamce[x.name][:accuracy]),
+                std(totalperfornamce[x.name][:precision]),
+                std(totalperfornamce[x.name][:recall]),
+                std(totalperfornamce[x.name][:specificity]),
+                std(totalperfornamce[x.name][:f1]),
+            )
+        end
+    )
+
+    meanperfornamce, stdperfornamce
+end
+
+# ╔═╡ be00e8ad-4f14-4478-b8d8-3c1f8db23471
+begin
+    convlstmmodel1_meanperfornamce, convlstmmodel1_stdperfornamce = wholepipeline(convlstmmodel1; repeat=10)
+end
+
+# ╔═╡ da001aeb-bd36-4a24-80b4-fa783db09912
+begin
+    convmodel1_meanperfornamce, convmodel1_stdperfornamce = wholepipeline(convmodel1; repeat=10)
+end
 
 # ╔═╡ Cell order:
 # ╟─f923a8c6-f2ed-41b8-9bd6-f9830790faec
 # ╟─41372110-ff60-11ef-1068-e92f06552b64
 # ╠═57f5fc4e-bf83-4e83-95bb-dd4c44c4b52f
-# ╟─c8f39317-2b0d-47e7-8dc8-52eebbf6193d
+# ╠═c8f39317-2b0d-47e7-8dc8-52eebbf6193d
 # ╟─6cb60280-d193-4756-9e84-1e6bf427379a
 # ╠═9b599684-619d-49a2-8844-e5fd18af52a2
 # ╠═32af21c7-f656-4770-87cc-7b084fd57580
@@ -879,18 +1205,25 @@ annotations["231"]
 # ╟─8b654cdd-8d27-40c8-932e-5752d394540f
 # ╟─2b1b21a3-97e5-4475-9963-e5794489f0c8
 # ╠═bb20f631-298e-4072-bcd0-0a8ed1aa954c
+# ╠═05de5742-b453-4b20-a156-42c53373974d
 # ╟─46ab0c02-74ac-434c-a525-7f01312e32ea
 # ╠═f9baee8e-8c0a-4e6f-b9a2-027fbdc04519
 # ╠═ec9fb06f-1c90-4463-bd58-6bd1d8177a8f
 # ╠═bfa6bd3e-93e0-491b-8e3a-1bc009e32858
-# ╠═1309496c-f270-44d2-bf9a-d775ab177076
+# ╟─1309496c-f270-44d2-bf9a-d775ab177076
+# ╠═71b193d8-8481-491a-847c-cbf49041c3d3
 # ╠═299034a7-cea1-4edb-a88f-43003bc34ca7
+# ╠═a54fd49b-40db-43d0-816b-9dd0a38a805c
 # ╠═81573a74-2b76-4365-a219-db7ed4da982a
-# ╠═56ed382b-7f26-45a6-b0e3-ec6f19f0f890
+# ╠═9afe58ed-8a5c-4660-a262-b21335022339
+# ╟─56ed382b-7f26-45a6-b0e3-ec6f19f0f890
+# ╟─efee10e4-8272-4717-b4ea-f4f53cd889ca
+# ╠═deeb8466-d89d-45d5-bd7d-ffef89c497e4
 # ╠═73302630-7c63-4a95-9196-82d15f3c3905
-# ╠═5277510a-71ab-46bd-bb44-b8a4b43709f1
-# ╠═71cd08e3-485c-492b-a5b8-bef07ea5f5b3
-# ╠═02f39a54-a95c-42dc-83b0-7529e548e7d6
+# ╠═2571d757-0562-4bc6-aaa5-1b2160e9f1ce
+# ╠═76f98311-86ad-4a15-891f-1cedb5d82713
+# ╠═3da44940-b063-4acf-a4eb-1ef94d0a3cbe
+# ╠═2c79044d-6c38-4d4f-bcd5-febd40993831
 # ╟─e7e4d8fc-f344-4495-b023-83a2ca66d885
 # ╟─1a67db99-ffc8-456d-a6c3-fd0da8755ace
 # ╠═13260533-5a77-4479-9378-44e7a1c4a861
@@ -898,12 +1231,12 @@ annotations["231"]
 # ╠═946022e6-382b-4b75-a76c-75c1625110a0
 # ╠═5c315695-291b-42a9-92c1-9db0323ffd4e
 # ╠═86beeb4b-c375-4a51-9c72-5c2754e764d4
+# ╠═e521d3cd-1939-49b9-a3ef-918ef605ad98
 # ╠═c166fbe0-3cf5-4af5-ba79-881347b336ee
 # ╠═2d79b5bd-34d4-4493-b7c3-f75ed577b7c1
-# ╠═1c95df10-2223-4dc6-8fc1-8299c0a97c1b
-# ╠═b7e00e62-7465-4548-9a47-7c5648a2a396
-# ╠═275201ca-e146-4976-a6b7-85dc84d001ee
-# ╠═0aa8efc0-a63b-466d-bcde-6c355af11272
 # ╠═48f84c8c-00a1-43db-a1a8-83c3edb5cd7a
-# ╠═996b1a7d-4e23-453b-858e-2b7d4db125e0
-# ╠═10a6ddd8-223b-41ab-b910-3d5dfa1a9880
+# ╠═6ae73a2d-b6f8-4b5f-b417-5e631fef5030
+# ╠═2c305721-2e11-4e21-992a-a30eea7f128f
+# ╠═26b88169-076f-433d-a760-64cd7743d393
+# ╠═be00e8ad-4f14-4478-b8d8-3c1f8db23471
+# ╠═da001aeb-bd36-4a24-80b4-fa783db09912
