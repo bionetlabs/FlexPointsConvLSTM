@@ -659,7 +659,7 @@ function rdpchunks(
 end
 
 # ╔═╡ deeb8466-d89d-45d5-bd7d-ffef89c497e4
-selectedpathology = "(VT"
+selectedpathology = "(T"
 
 # ╔═╡ 73302630-7c63-4a95-9196-82d15f3c3905
 vtfp, vt_targetcounter, vt_normalcounter = let
@@ -796,7 +796,49 @@ let
     scatter!(ax, vtpoints, color=:darkorange2)
     lines!(ax, signal.reconstruction[startpoint:endpoint], color=:deepskyblue3, linestyle=:dashdot, linewidth=1.5)
 
-    save(joinpath(projectdir, "img", "Fig1_(VT.png"), fig1, px_per_unit=1)
+    save(joinpath(projectdir, "img", "Fig1_$selectedpathology.png"), fig1, px_per_unit=1)
+
+    fig1
+end
+
+# ╔═╡ 94cfd77d-92d8-4c19-b3c1-897a5aa0dcbb
+let
+    WGLMakie.activate!()
+    set_theme!(theme_light())
+
+    fontsize = 12 * 2
+    fig1 = Figure(size=(3.25 * 300, 2.25 * 300), fontsize=fontsize, fonts=(; regular="Times New Roman"), textcolor=:black)
+
+    startpoint = 780
+    endpoint = 1250
+    ax = Axis(
+        fig1[1, 1],
+        titlealign=:left,
+        # title=string("A) ", auxlabeldescribed[selectedpathology]),
+        titlefont="Times New Roman",
+        titlecolor=:gray25,
+        titlesize=fontsize,
+        yautolimitmargin=(0.05, 0.05),
+        xautolimitmargin=(0.05, 0.05),
+        xticks=(1:360:(endpoint-startpoint), collect(map(x -> string(Int(round((x - startpoint) / 360; digits=0))), collect(startpoint:360:endpoint)))),
+        xlabel="time (s)",
+        xlabelsize=fontsize * 1.2,
+        ylabel="signal amplitude (mV)",
+        ylabelsize=fontsize * 1.2,
+    )
+
+    signal = vtfp[selectedpathology]["I"][1]
+
+    fpmin = findfirst(x -> x[1] >= startpoint, signal.flexpoints)
+    fpmax = findlast(x -> x[1] <= endpoint, signal.flexpoints)
+
+    vtpoints = signal.flexpoints[fpmin:fpmax]
+    vtpoints = map(x -> (x[1] - (startpoint - 1), x[2]), vtpoints) |> collect
+    lines!(ax, signal.data[startpoint:endpoint], color=:gray53, linewidth=0.7)
+    scatter!(ax, vtpoints, color=:darkorange2)
+    lines!(ax, signal.reconstruction[startpoint:endpoint], color=:deepskyblue3, linestyle=:dashdot, linewidth=1.5)
+
+    save(joinpath(projectdir, "img", "Fig4.png"), fig1, px_per_unit=1)
 
     fig1
 end
@@ -968,7 +1010,7 @@ begin
 
             # x -> (println("before maxpool3: ", size(x)); x),
             MaxPool((2,), stride=2),
-			
+
             # x -> (println("before flatten: ", size(x)); x),
             Flux.flatten,
 
@@ -989,7 +1031,7 @@ begin
         )
     end
     convmodel1 = @load(NeuralNetworkClassifier, pkg = "MLJFlux", verbosity = 0)(
-        builder=builder, epochs=500, batch_size=128, acceleration=CUDALibs(), optimiser=Flux.Optimisers.Adam(0.001), rng=rngseed
+        builder=builder, epochs=500, batch_size=64, acceleration=CUDALibs(), optimiser=Flux.Optimisers.Adam(0.001), rng=rngseed
     )
 end
 
@@ -1053,6 +1095,79 @@ end
     recall::Float64
     specificity::Float64
     f1::Float64
+end
+
+# ╔═╡ 57a3aa36-d932-49c9-9b94-71900acc0691
+function singlepipeline_rdp(model)::Vector{Performance}
+    rdpmach1 = machine(model, xrdp_train, yrdp_train) |> fit!
+    rdpmach1_fold = machine(model, xrdp_train_fold, yrdp_train_fold) |> fit!
+
+    yhat_rdp = MLJ.predict_mode(rdpmach1, xrdp_test)
+    accuracy_rdp, precision_rdp, recall_rdp, specificity_rdp, f1_rdp = classificationscore(yrdp_test, yhat_rdp, selectedpathology)
+    yhat_rdp_fold = MLJ.predict_mode(rdpmach1_fold, xrdp_test_fold)
+    accuracy_rdp_fold, precision_rdp_fold, recall_rdp_fold, specificity_rdp_fold, f1_rdp_fold = classificationscore(
+        yrdp_test_fold, yhat_rdp_fold, selectedpathology
+    )
+
+    accuracy_rdp_cv = mean([accuracy_rdp, accuracy_rdp_fold])
+    precision_rdp_cv = mean([precision_rdp, precision_rdp_fold])
+    recall_rdp_cv = mean([recall_rdp, recall_rdp_fold])
+    specificity_rdp_cv = mean([specificity_rdp, specificity_rdp_fold])
+    f1_rdp_cv = mean([f1_rdp, f1_rdp_fold])
+
+    [
+        Performance("rdp", accuracy_rdp, precision_rdp, recall_rdp, specificity_rdp, f1_rdp),
+        Performance("rdp_fold", accuracy_rdp_fold, precision_rdp_fold, recall_rdp_fold, specificity_rdp_fold, f1_rdp_fold),
+        Performance("rdp_cv", accuracy_rdp_cv, precision_rdp_cv, recall_rdp_cv, specificity_rdp_cv, f1_rdp_cv)
+    ]
+end
+
+# ╔═╡ 8f61c85b-ac2c-458a-a41a-14b6f02b65ce
+function singlepipeline_raw(model)::Vector{Performance}
+    rawmach1 = machine(model, x_train, y_train) |> fit!
+    rawmach1_fold = machine(model, x_train_fold, y_train_fold) |> fit!
+
+    yhat_raw = MLJ.predict_mode(rawmach1, x_test)
+    accuracy_raw, precision_raw, recall_raw, specificity_raw, f1_raw = classificationscore(y_test, yhat_raw, selectedpathology)
+    yhat_raw_fold = MLJ.predict_mode(rawmach1_fold, x_test_fold)
+    accuracy_raw_fold, precision_raw_fold, recall_raw_fold, specificity_raw_fold, f1_raw_fold = classificationscore(y_test_fold, yhat_raw_fold, selectedpathology)
+
+    accuracy_raw_cv = mean([accuracy_raw, accuracy_raw_fold])
+    precision_raw_cv = mean([precision_raw, precision_raw_fold])
+    recall_raw_cv = mean([recall_raw, recall_raw_fold])
+    specificity_raw_cv = mean([specificity_raw, specificity_raw_fold])
+    f1_raw_cv = mean([f1_raw, f1_raw_fold])
+
+    [
+        Performance("raw", accuracy_raw, precision_raw, recall_raw, specificity_raw, f1_raw),
+        Performance("raw_fold", accuracy_raw_fold, precision_raw_fold, recall_raw_fold, specificity_raw_fold, f1_raw_fold),
+        Performance("raw_cv", accuracy_raw_cv, precision_raw_cv, recall_raw_cv, specificity_raw_cv, f1_raw_cv),
+    ]
+end
+
+# ╔═╡ 1d270e26-a542-4ddc-a8e2-ae7242190bdf
+function singlepipeline_fp(model)::Vector{Performance}
+    fpmach1 = machine(model, xr_train, yr_train) |> fit!
+    fpmach1_fold = machine(model, xr_train_fold, yr_train_fold) |> fit!
+
+    yhat_fp = MLJ.predict_mode(fpmach1, xr_test)
+    accuracy_fp, precision_fp, recall_fp, specificity_fp, f1_fp = classificationscore(yr_test, yhat_fp, selectedpathology)
+    yhat_fp_fold = MLJ.predict_mode(fpmach1_fold, xr_test_fold)
+    accuracy_fp_fold, precision_fp_fold, recall_fp_fold, specificity_fp_fold, f1_fp_fold = classificationscore(
+        yr_test_fold, yhat_fp_fold, selectedpathology
+    )
+
+    accuracy_fp_cv = mean([accuracy_fp, accuracy_fp_fold])
+    precision_fp_cv = mean([precision_fp, precision_fp_fold])
+    recall_fp_cv = mean([recall_fp, recall_fp_fold])
+    specificity_fp_cv = mean([specificity_fp, specificity_fp_fold])
+    f1_fp_cv = mean([f1_fp, f1_fp_fold])
+
+    [
+        Performance("fp", accuracy_fp, precision_fp, recall_fp, specificity_fp, f1_fp),
+        Performance("fp_fold", accuracy_fp_fold, precision_fp_fold, recall_fp_fold, specificity_fp_fold, f1_fp_fold),
+        Performance("fp_cv", accuracy_fp_cv, precision_fp_cv, recall_fp_cv, specificity_fp_cv, f1_fp_cv),
+    ]
 end
 
 # ╔═╡ 2c305721-2e11-4e21-992a-a30eea7f128f
@@ -1177,15 +1292,99 @@ function wholepipeline(model; repeat::Int=10)
     meanperfornamce, stdperfornamce
 end
 
-# ╔═╡ be00e8ad-4f14-4478-b8d8-3c1f8db23471
-begin
-    convlstmmodel1_meanperfornamce, convlstmmodel1_stdperfornamce = wholepipeline(convlstmmodel1; repeat=10)
+# ╔═╡ 6a70f7ec-7d99-4aa8-aa7c-65fb20d39fc8
+function multipipeline_rdp(model; repeat::Int=10)
+    allresults = []
+    for i in 1:repeat
+        performance = singlepipeline_rdp(model)
+        push!(allresults, performance)
+        @info "[$i]: $performance"
+    end
+
+    allresults
 end
 
-# ╔═╡ da001aeb-bd36-4a24-80b4-fa783db09912
-begin
-    convmodel1_meanperfornamce, convmodel1_stdperfornamce = wholepipeline(convmodel1; repeat=10)
+# ╔═╡ 72d2765b-0ada-4e1f-9853-2641b5a01e49
+function multipipeline_raw(model; repeat::Int=10)
+    allresults = []
+    for i in 1:repeat
+        performance = singlepipeline_raw(model)
+        push!(allresults, performance)
+        @info "[$i]: $performance"
+    end
+
+    allresults
 end
+
+# ╔═╡ 2c130ab8-f4a0-41a8-bf71-ed09d889d435
+function multipipeline_fp(model; repeat::Int=10)
+    allresults = []
+    for i in 1:repeat
+        performance = singlepipeline_fp(model)
+        push!(allresults, performance)
+        @info "[$i]: $performance"
+    end
+
+    allresults
+end
+
+# ╔═╡ be00e8ad-4f14-4478-b8d8-3c1f8db23471
+# ╠═╡ show_logs = false
+# ╠═╡ disabled = true
+#=╠═╡
+begin
+    convlstmmodel1_meanperfornamce, convlstmmodel1_stdperfornamce = wholepipeline(convlstmmodel1; repeat=5)
+end
+  ╠═╡ =#
+
+# ╔═╡ 17976815-c487-4762-bf28-32ad1edcd433
+# ╠═╡ disabled = true
+#=╠═╡
+begin
+    open(joinpath("..", "results", "$(lowercase(selectedpathology[2:end]))_convlstmmodel1_meanperfornamce.json"), "w") do f
+        write(f, JSON.json(convlstmmodel1_meanperfornamce))
+    end
+    open(joinpath("..", "results", "$(lowercase(selectedpathology[2:end]))_convlstmmodel1_stdperfornamce.json"), "w") do f
+        write(f, JSON.json(convlstmmodel1_stdperfornamce))
+    end
+end
+  ╠═╡ =#
+
+# ╔═╡ da001aeb-bd36-4a24-80b4-fa783db09912
+# ╠═╡ show_logs = false
+# ╠═╡ disabled = true
+#=╠═╡
+begin
+    convmodel1_meanperfornamce, convmodel1_stdperfornamce = wholepipeline(convmodel1; repeat=5)
+end
+  ╠═╡ =#
+
+# ╔═╡ 0e87e353-a79c-4ed0-9ac6-83d00b7ab93d
+# ╠═╡ disabled = true
+#=╠═╡
+begin
+    open(joinpath("..", "results", "$(lowercase(selectedpathology[2:end]))_convmodel1_meanperfornamce.json"), "w") do f
+        write(f, JSON.json(convmodel1_meanperfornamce))
+    end
+    open(joinpath("..", "results", "$(lowercase(selectedpathology[2:end]))_convmodel1_stdperfornamce.json"), "w") do f
+        write(f, JSON.json(convmodel1_stdperfornamce))
+    end
+end
+  ╠═╡ =#
+
+# ╔═╡ 4dcd8a90-248a-4488-96f6-99bdefce0775
+# multipipeline_raw(convlstmmodel1; repeat=5)
+# multipipeline_fp(convlstmmodel1; repeat=5)
+# multipipeline_rdp(convlstmmodel1; repeat=5)
+
+# ╔═╡ 0581b49a-6e30-4886-87ba-12e4f307e121
+# multipipeline_raw(convmodel1; repeat=25)
+
+# ╔═╡ ef818394-1f8f-4af5-a5ba-7b99fd85ea00
+# multipipeline_fp(convmodel1; repeat=25)
+
+# ╔═╡ 835baa43-ae96-4f68-a372-b2420eed7e98
+# multipipeline_rdp(convmodel1; repeat=25)
 
 # ╔═╡ Cell order:
 # ╟─f923a8c6-f2ed-41b8-9bd6-f9830790faec
@@ -1227,6 +1426,7 @@ end
 # ╟─e7e4d8fc-f344-4495-b023-83a2ca66d885
 # ╟─1a67db99-ffc8-456d-a6c3-fd0da8755ace
 # ╠═13260533-5a77-4479-9378-44e7a1c4a861
+# ╠═94cfd77d-92d8-4c19-b3c1-897a5aa0dcbb
 # ╟─103fe3b0-1010-401e-97ea-ea98d4a67303
 # ╠═946022e6-382b-4b75-a76c-75c1625110a0
 # ╠═5c315695-291b-42a9-92c1-9db0323ffd4e
@@ -1236,7 +1436,19 @@ end
 # ╠═2d79b5bd-34d4-4493-b7c3-f75ed577b7c1
 # ╠═48f84c8c-00a1-43db-a1a8-83c3edb5cd7a
 # ╠═6ae73a2d-b6f8-4b5f-b417-5e631fef5030
-# ╠═2c305721-2e11-4e21-992a-a30eea7f128f
-# ╠═26b88169-076f-433d-a760-64cd7743d393
+# ╠═57a3aa36-d932-49c9-9b94-71900acc0691
+# ╠═8f61c85b-ac2c-458a-a41a-14b6f02b65ce
+# ╠═1d270e26-a542-4ddc-a8e2-ae7242190bdf
+# ╟─2c305721-2e11-4e21-992a-a30eea7f128f
+# ╟─26b88169-076f-433d-a760-64cd7743d393
+# ╠═6a70f7ec-7d99-4aa8-aa7c-65fb20d39fc8
+# ╠═72d2765b-0ada-4e1f-9853-2641b5a01e49
+# ╠═2c130ab8-f4a0-41a8-bf71-ed09d889d435
 # ╠═be00e8ad-4f14-4478-b8d8-3c1f8db23471
+# ╟─17976815-c487-4762-bf28-32ad1edcd433
 # ╠═da001aeb-bd36-4a24-80b4-fa783db09912
+# ╟─0e87e353-a79c-4ed0-9ac6-83d00b7ab93d
+# ╠═4dcd8a90-248a-4488-96f6-99bdefce0775
+# ╠═0581b49a-6e30-4886-87ba-12e4f307e121
+# ╠═ef818394-1f8f-4af5-a5ba-7b99fd85ea00
+# ╠═835baa43-ae96-4f68-a372-b2420eed7e98
